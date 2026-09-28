@@ -3,17 +3,15 @@
 **Search code by meaning.** Ask "where do we retry failed payments?" and get `file:line` ranges in about 1–2 seconds, even when the code never uses the words in your question.
 
 ```
-$ cd dio && jevgrep "Where does a request get rejected because the response status is not acceptable?"
-  0.24  lib/src/options.dart:697-758  bool _defaultValidateStatus(int? status) {
-  0.20  lib/src/dio_exception.dart:13-45  enum DioExceptionType {
-  0.11  lib/src/interceptor.dart:348-373  void onResponse(
-  0.06  lib/src/dio_mixin.dart:591-656  Future<Response<dynamic>> _dispatchRequest<T>(RequestOptions reqOpt) async {
-  0.06  lib/src/interceptor.dart:515-535  Object? _handleResponse(
-  grep  test/pinning_test.dart:9-158  void main() {
-  grep  lib/src/dio/dio_for_native.dart:26-126  Future<Response> download(
+$ cd flutter/packages/flutter
+$ jevgrep "When I turn on the slow-motion debug switch, all my app's animations crawl. Where does the app stretch out the clock each frame gets?" -k 3
+  0.86  lib/src/scheduler/binding.dart:1108-1167  Duration _adjustForEpoch(Duration rawTimeStamp) {
+  0.56  lib/src/scheduler/binding.dart:1086-1107  void resetEpoch() {
+  0.49  lib/src/scheduler/binding.dart:40-82  set timeDilation(double value) {
+  grep  lib/animation.dart:1-150  ...
 ```
 
-A real run on the public `dio` package, in 1 s. #1 is the rule that decides which statuses pass. #4 is where the request actually gets rejected (`validateStatus` on line 622). The question never says "validate". The scores are not a guarantee, so read the top few.
+One of the 20 benchmark questions, run on the Flutter framework (694 files). The question never says "time dilation" or "epoch", and the first pick is the function that scales each frame's timestamp. Not every question goes this well: see [Results](#results). Read the top few.
 
 One Python file, standard library only. It uses TypeSafe's [**jev**](https://docs.typesafe.ai) choice model: it never generates text, it only picks the best option from a list.
 
@@ -53,21 +51,36 @@ The first run in a repo reads and summarises every source file, then caches the 
 
 ## How it works
 
-1. **Chunk.** Every source file is split into whole declarations (functions, classes). Doc comments stay attached, and tiny header pieces merge into the next one.
+1. **Chunk.** Every source file is split into whole declarations (functions, classes, and methods in Dart/Java/Kotlin). Doc comments stay attached, and tiny header pieces merge into the next one.
 2. **Summarise.** Each chunk becomes its signature plus every identifier and short string used inside. That is how a question about a "not acceptable status" can find code that only says `validateStatus`.
-3. **Grep lane (free, local).** Question words are matched against identifier parts (`imageSharpness` → image, sharpness). The best 8 chunks always go into the candidate list.
-4. **Jev lane.**
-   - In big repos, jev first picks folders. It picks top-level groups first when there are more than 200, because jev takes about 250 options at most.
-   - Then it picks files, then the final chunks.
-5. **Answer.** It prints jev's top 5 plus grep's best 2, so a miss by one lane can still be caught by the other.
+3. **Grep lane (free, local).** Question words are matched against identifier parts (`imageSharpness` → image, sharpness). The best 8 chunks always join the candidates.
+4. **Folders, then files: one yes/no per entry.** jev gives each folder (big repos) and each file its own probability, and jevgrep keeps *everything* above a threshold instead of betting on a top few. Requests run in parallel.
+5. **Pick.** jev picks the likeliest chunks from the summaries.
+6. **Check on real code.** The top 8 candidates (plus grep's best 2) are judged again on their actual, line-numbered code: "does this passage really do what the search describes?" That yes/no probability sets the final order.
+
+Steps 4 and 6 are adapted from [jegrep](https://github.com/can1357/jegrep) by Can Bölük (MIT): absolute yes/no judgments, keep-above-threshold, parallel batches, and verifying on real content. jevgrep checks whole functions instead of fixed line blocks, which is why its ranges are tighter.
 
 ## Results
 
 Each test used an answer key of "where is X?" questions written by one agent. Some had an obvious keyword; the rest were phrased by behaviour, with words that don't appear in the code. A separate agent that never saw the key answered with grep, timed. All scores come from **held-out** questions that were never used for tuning.
 
+**Big public repo: the Flutter framework** (`packages/flutter`, 694 files, 566k lines), 20 held-out questions: 6 keyword, 7 behaviour, 7 vague. The questions and answers are in [`bench/questions_flutter.json`](bench/questions_flutter.json), so you can rerun this yourself.
+
+| | jevgrep v4 (current) | jevgrep v3 | [jegrep](https://github.com/can1357/jegrep) 0.1.3 |
+|---|---|---|---|
+| Found | **18/20** | 17/20 | 16/20 |
+| First pick right | 14/20 | 10/20 | **15/20** |
+| Vague questions, first pick | **4/7** | 1/7 | **4/7** |
+| Lines to read to reach the hit (median) | **77** | 103 | 395 |
+| Time per question | 4.1 s | 3.0 s | **1.8 s** |
+
+v4 finds the most answers and points at the tightest ranges. jegrep is right on the first pick one more time out of 20, and it is about 2× faster.
+
+Earlier tests used v3:
+
 **Small repo:** a 27-file, 10k-line Swift app, 20 questions.
 
-| | AI agent + grep | jevgrep | [jegrep](https://github.com/can1357/jegrep) |
+| | AI agent + grep | jevgrep v3 | jegrep |
 |---|---|---|---|
 | Found | 20/20 | **20/20** | 16/20 |
 | First pick right | 20/20 | 17/20 | 16/20 |
@@ -76,7 +89,7 @@ Each test used an answer key of "where is X?" questions written by one agent. So
 
 **Big repo:** a 1,967-file, 362k-line Flutter app, 20 questions. Measured before the fix that made jevgrep see Dart/Java/Kotlin methods, so jevgrep's numbers here are a floor.
 
-| | AI agent + grep | jevgrep | jegrep |
+| | AI agent + grep | jevgrep v3 | jegrep |
 |---|---|---|---|
 | Found | **20/20** | 16/20 | 12/20 |
 | First pick right | **20/20** | 10/20 | 12/20 |
@@ -85,7 +98,7 @@ Each test used an answer key of "where is X?" questions written by one agent. So
 | Time | 9.7 s | 2.2 s | 1.5 s |
 
 **What this means:**
-- jevgrep beats jegrep on behaviour questions and points at tighter ranges. jegrep is better at keyword questions.
+- v3 beat jegrep on behaviour questions and pointed at tighter ranges. jegrep was better at keyword questions, which is what v4's yes/no and real-code steps took from it.
 - Against an AI agent with grep, both lose on accuracy. An agent needs only about 2 grep calls to find a single-answer question.
 - The case jevgrep is built for is untested: **a person** new to a codebase, hunting by hand. That comparison is next.
 
@@ -123,4 +136,4 @@ Rerun it on your own repo: write an answer key and run `python3 bench/score.py <
 
 ## License
 
-MIT. Built on TypeSafe's jev model. The benchmark method came from [fastBrowserTool](https://github.com/varunlohade/fastBrowserTool).
+MIT. Built on TypeSafe's jev model. Search ideas adapted from jegrep, © 2026 Can Bölük, MIT (see [NOTICE](NOTICE)). The benchmark method came from [fastBrowserTool](https://github.com/varunlohade/fastBrowserTool).

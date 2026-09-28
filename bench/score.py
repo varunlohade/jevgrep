@@ -4,9 +4,12 @@ usage: score.py <repo> <questions.json>
 questions.json: [{"id", "kind": "keyword"|"behaviour", "question", "file", "start", "end", "needle"}]"""
 import json, os, subprocess, sys, time
 root, qfile = os.path.abspath(sys.argv[1]), sys.argv[2]
-JEVGREP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "jevgrep")
+JEVGREP = os.environ.get("JEVGREP") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "jevgrep")
 rows = []
 for q in json.load(open(qfile)):
+    src = open(os.path.join(root, q["file"]), errors="replace").read().splitlines()
+    if not any(q["needle"] in l and q["start"] <= i + 1 <= q["end"] for i, l in enumerate(src)):
+        print(f"#{q['id']} skipped: answer key no longer matches the code"); continue
     t = time.time()
     res = json.loads(subprocess.run([JEVGREP, q["question"], root, "--json"], capture_output=True, text=True, check=True).stdout)
     secs = time.time() - t

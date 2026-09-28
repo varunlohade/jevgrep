@@ -27,17 +27,22 @@ def load_key():
 
 
 def post_json(url, key, body):
+    import random
     data = json.dumps(body).encode()
-    for attempt in range(3):
+    for attempt in range(6):
         req = urllib.request.Request(url, data=data, method="POST", headers={
             "Authorization": f"Bearer {key}", "Content-Type": "application/json"})
         try:
             with urllib.request.urlopen(req, timeout=60) as r:
                 return json.load(r)
         except urllib.error.HTTPError as e:
-            if e.code in (429, 503, 529) and attempt < 2:
-                time.sleep(0.5 * 2 ** attempt); continue
-            raise RuntimeError(f"jev returned HTTP {e.code}") from None
+            if e.code in (408, 429, 500, 502, 503, 504, 529) and attempt < 5:
+                time.sleep(0.4 * 2 ** attempt + random.random() * 0.3); continue
+            raise RuntimeError(f"jev returned HTTP {e.code}: {e.read()[:200]!r}") from None
+        except (urllib.error.URLError, TimeoutError, ConnectionError):
+            if attempt < 5:
+                time.sleep(0.4 * 2 ** attempt); continue
+            raise
     raise RuntimeError("jev unavailable")
 
 
@@ -127,7 +132,7 @@ def ask(question, criteria, state=None):
     return post_json(API, KEY, body)["answers"]["q"]
 
 CACHE_DIR = os.path.expanduser("~/.cache/jevgrep")
-CACHE_VERSION = "2"  # bump when chunking or summaries change
+CACHE_VERSION = "3"  # bump when chunking or summaries change
 
 def indexed(root, files):
     """Chunk and summarise every file once; keep it on disk keyed by mtime."""
@@ -194,9 +199,51 @@ def pick_folders(question, folders, n=6):
     a = ask(f"Which folder most likely contains the code that answers: {question}", fit(crit, 70_000))
     return [names[int(key) - 1] for key in top_keys(a, n, 0.95)]
 
-def find(root, question, k=5, max_files=6, max_chunks=MAX_OPTIONS, as_json=False):
-    """Search code by meaning. Recall first: grep and jev both nominate; jev makes the final pick.
-    Big repos: grep + a folder pick shortlist files, jev picks files, then jev picks chunks."""
+FILE_YES = ("true", "A file at this path plausibly contains code matching the search.")
+FILE_NO = ("false", "Unrelated by name and location, or generated output, config, or boilerplate that would not hold it.")
+DIR_YES = "The folder plausibly contains, at any depth, at least one file matching the search."
+DIR_NO = "Nothing about the folder's name, location, or listed files suggests it holds a match."
+CODE_YES = "The code directly implements, decides, or defines what the search describes."
+CODE_NO = "The code is unrelated, or only shares surface words with the search without doing the thing itself."
+BATCH = 64       # yes/no questions per request
+PARALLEL = 8     # requests in flight
+
+def nouls(question, state, items, instruction, yes, no):
+    """One yes/no question per item, batched and sent in parallel. Returns P(yes) per item.
+    Absolute probabilities (not a share of one pick) let us keep everything above a threshold."""
+    from concurrent.futures import ThreadPoolExecutor
+    def run(part):
+        qs = {f"q{i:03d}": {"type": "noul", "instructions": instruction(key),
+                             "criteria": {"true": yes, "false": no}} for i, key in enumerate(part)}
+        body = {"model": os.environ.get("TYPESAFE_MODEL", "jev-latest"), "state": {**state, "search": question},
+                "questions": qs}
+        ans = post_json(API, KEY, body)["answers"]
+        return [ans.get(f"q{i:03d}", {}).get("noul", 0.0) for i in range(len(part))]
+    parts = [items[i:i + BATCH] for i in range(0, len(items), BATCH)]
+    with ThreadPoolExecutor(PARALLEL) as pool:
+        return [p for chunk in pool.map(run, parts) for p in chunk]
+
+def keep(items, scores, tau, cap, floor=3):
+    """Everything at or above tau (at most cap); never fewer than floor, so a timid model still returns leads."""
+    order = sorted(range(len(items)), key=lambda i: -scores[i])
+    picked = [i for i in order if scores[i] >= tau][:cap]
+    return [items[i] for i in (picked if len(picked) >= floor else order[:floor])]
+
+def tagged_code(lines, a, b, budget=2400):
+    out, used = [], 0
+    for n in range(a, b):
+        row = f"L{n + 1}| {lines[n]}"
+        if used + len(row) > budget:
+            out.append("…"); break
+        out.append(row); used += len(row) + 1
+    return "\n".join(out)
+
+def find(root, question, k=5, max_chunks=MAX_OPTIONS, as_json=False):
+    """Search code by meaning.
+    1. grep lane: question words vs identifier parts (local, free).
+    2. folders, then files: one yes/no per entry, keep all above a threshold (big repos only for folders).
+    3. chunks: jev picks from whole-declaration summaries.
+    4. check: the top candidates are judged again on their real, line-numbered code."""
     t0 = time.perf_counter()
     files = code_files(root)
     if not files:
@@ -209,54 +256,87 @@ def find(root, question, k=5, max_files=6, max_chunks=MAX_OPTIONS, as_json=False
         return sum(any(t.startswith(q) or q.startswith(t) and len(t) >= 4 for t in tokens) for q in qwords)
     graded = sorted(((gscore(c[4]), f, c) for f in files for c in idx[f][2]), key=lambda x: -x[0])
     grep_hits = [(f, c) for sc, f, c in graded[:8] if sc > 0]
-    decls = {f: idx[f][1] for f in files}
-    # Shortlist files. Small repos: all of them. Big repos: grep's best files + jev's folder pick.
-    if len(files) <= 120:
-        shortlist = list(files)
-    else:
-        by_file = {}
-        for sc, f, c in graded:
-            if sc > 0 and len(by_file) < 40:
-                by_file.setdefault(f, sc)
+    grep_files = list(dict.fromkeys(f for sc, f, c in graded if sc > 0))[:30]
+    # Folders (big repos): yes/no per folder from its path and file names.
+    shortlist = list(files)
+    if len(files) > 200:
         folders = {}
         for f in files:
             folders.setdefault(os.path.dirname(f) or ".", []).append(f)
-        picked = [f for d in pick_folders(question, folders) for f in folders[d]]
-        shortlist = list(dict.fromkeys(list(by_file) + picked))[:MAX_OPTIONS]
+        names = sorted(folders)
+        state = {"task": "Semantic grep over a source tree: find folders likely to hold the code the search describes.",
+                 "folders": {f"f{i:03d}": {"path": d, "files": [os.path.basename(x) for x in folders[d]][:40]}
+                             for i, d in enumerate(names)}}
+        # The state holds every folder; questions refer to them by key, so each batch sees the whole tree.
+        keys = [f"f{i:03d}" for i in range(len(names))]
+        if len(json.dumps(state)) > 70_000:
+            for v in state["folders"].values():
+                v["files"] = v["files"][:8]
+        ps = nouls(question, state, keys,
+                   lambda key: f"Does folder `folders.{key}` contain, at any depth, a file relevant to this search: \"{question}\"?",
+                   DIR_YES, DIR_NO)
+        best = keep(names, ps, 0.3, 12)
+        shortlist = list(dict.fromkeys(grep_files + [f for d in best for f in folders[d]]))
     t_short = time.perf_counter()
-    if len(shortlist) <= max_files:
-        top_files = shortlist
-    else:
-        crit = {str(i + 1): f"{f}: {decls[f]}" for i, f in enumerate(shortlist)}
-        a = ask(f"Which source file most likely contains the code that answers: {question}", fit(crit))
-        top_files = [shortlist[int(key) - 1] for key in top_keys(a, max_files)]
+    # Files: yes/no per file from its path and declared names.
+    parts = [shortlist[i:i + BATCH] for i in range(0, len(shortlist), BATCH)]
+    fps = []
+    from concurrent.futures import ThreadPoolExecutor
+    def judge_files(part):
+        state = {"task": "Semantic grep: judge which source files likely hold the code the search describes.",
+                 "files": {f"e{i:03d}": {"path": f, "declares": idx[f][1][:500]} for i, f in enumerate(part)}}
+        return nouls(question, state, [f"e{i:03d}" for i in range(len(part))],
+                     lambda key: f"Is file `files.{key}` likely to contain what this search is looking for: \"{question}\"?",
+                     FILE_YES[1], FILE_NO[1])
+    with ThreadPoolExecutor(PARALLEL) as pool:
+        for chunk in pool.map(judge_files, parts):
+            fps += chunk
+    top_files = keep(shortlist, fps, 0.4, 8)
     t1 = time.perf_counter()
+    # Chunks: jev picks from whole-declaration summaries.
     cands, seen = [], set()
     for f, c in grep_hits + [(f, c) for f in top_files for c in idx[f][2]]:
         if (f, c[1]) not in seen:
             seen.add((f, c[1])); cands.append((f, c))
-    cands = cands[:max_chunks]  # never above jev's option limit
+    cands = cands[:max_chunks]
     a = ask(f"Which code chunk answers: {question}", fit({str(i + 1): c[3] for i, (f, c) in enumerate(cands)}))
-    ranked = sorted(a["probabilities"].items(), key=lambda kv: -kv[1])[:k]
+    pick_p = {int(key) - 1: p for key, p in a["probabilities"].items()}
+    shortlist_chunks = sorted(range(len(cands)), key=lambda i: -pick_p.get(i, 0))[:8]
+    for f, c in grep_hits[:2]:                     # grep's best always get a real-code check too
+        i = cands.index((f, c))
+        if i not in shortlist_chunks:
+            shortlist_chunks.append(i)
     t2 = time.perf_counter()
-    picks = [cands[int(key) - 1] + (p,) for key, p in ranked]
+    # Check: judge each candidate on its real, line-numbered code.
+    state = {"task": "Semantic grep: decide whether each code passage actually contains what the search describes.",
+             "passages": {f"c{j:02d}": {"file": cands[i][0], "code": tagged_code(idx_lines(root, cands[i][0]), cands[i][1][1], cands[i][1][2])}
+                          for j, i in enumerate(shortlist_chunks)}}
+    vs = nouls(question, state, [f"c{j:02d}" for j in range(len(shortlist_chunks))],
+               lambda key: f"Does passage `passages.{key}` actually contain what this search describes: \"{question}\"?",
+               CODE_YES, CODE_NO)
+    verified = sorted(zip(shortlist_chunks, vs), key=lambda iv: (-iv[1], -pick_p.get(iv[0], 0)))
+    t3 = time.perf_counter()
+    picks = [cands[i] + (v,) for i, v in verified[:k]]
     top = {(f, c[1]) for f, c, _ in picks}
     extra = [(f, c) for f, c in grep_hits[:2] if (f, c[1]) not in top]
     ms = lambda a_, b_: round((b_ - a_) * 1000)
     if as_json:
         hit = lambda f, c, src, p: {"file": f, "start": c[1] + 1, "end": c[2], "score": p, "source": src,
                                     "signature": c[3].split(" | ")[0].split(" ", 1)[-1]}
-        return json.dumps({"question": question, "root": root, "ms": ms(t0, t2), "files": len(files),
+        return json.dumps({"question": question, "root": root, "ms": ms(t0, t3), "files": len(files),
                            "hits": [hit(f, c, "jev", round(p, 3)) for f, c, p in picks] +
                                    [hit(f, c, "grep", None) for f, c in extra]}, indent=1)
-    lines = [f"{question}  ({len(files)} files → {len(shortlist)} → {len(top_files)} + grep → {len(cands)} chunks; "
-             f"{ms(t0, t2)}ms = index {ms(t0, t_index)} + shortlist {ms(t_index, t_short)} + files {ms(t_short, t1)} + chunks {ms(t1, t2)})"]
+    lines = [f"{question}  ({len(files)} files → {len(shortlist)} → {len(top_files)} + grep → {len(cands)} chunks → "
+             f"{len(shortlist_chunks)} checked; {ms(t0, t3)}ms = index {ms(t0, t_index)} + folders {ms(t_index, t_short)} "
+             f"+ files {ms(t_short, t1)} + chunks {ms(t1, t2)} + check {ms(t2, t3)})"]
     for f, c, p in picks:
         lines.append(f"  {p:.2f}  {f}:{c[1] + 1}-{c[2]}  {c[3].split(' | ')[0].split(' ', 1)[-1][:80]}")
     for f, c in extra:
         lines.append(f"  grep  {f}:{c[1] + 1}-{c[2]}  {c[3].split(' | ')[0].split(' ', 1)[-1][:80]}")
     return "\n".join(lines)
 
+def idx_lines(root, f):
+    return open(os.path.join(root, f), errors="replace").read().splitlines()
 
 
 def main():

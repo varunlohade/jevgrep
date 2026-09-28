@@ -1,0 +1,182 @@
+[
+ {
+  "id": 1,
+  "kind": "keyword",
+  "question": "Where is the hue computed from the red, green and blue components when converting a color to HSV or HSL?",
+  "file": "lib/src/painting/colors.dart",
+  "start": 13,
+  "end": 28,
+  "needle": "hue = 60.0 * (((green - blue) / delta) % 6);"
+ },
+ {
+  "id": 2,
+  "kind": "keyword",
+  "question": "How does the spring simulation decide whether a spring is overdamped, underdamped, or critically damped?",
+  "file": "lib/src/physics/spring_simulation.dart",
+  "start": 286,
+  "end": 296,
+  "needle": "> 0.0 => _OverdampedSolution(spring, initialPosition, initialVelocity),"
+ },
+ {
+  "id": 3,
+  "kind": "keyword",
+  "question": "How does the debug print word wrap split a long message into lines of a given width while keeping indentation?",
+  "file": "lib/src/foundation/print.dart",
+  "start": 147,
+  "end": 218,
+  "needle": "_WordWrapParseMode mode = _WordWrapParseMode.inSpace;"
+ },
+ {
+  "id": 4,
+  "kind": "keyword",
+  "question": "Where are the bytes of an HTTP client response collected into one buffer, with gzip uncompression when the response is compressed?",
+  "file": "lib/src/foundation/consolidate_response.dart",
+  "start": 49,
+  "end": 102,
+  "needle": "sink = gzip.decoder.startChunkedConversion(output);"
+ },
+ {
+  "id": 5,
+  "kind": "keyword",
+  "question": "How does a table compute its column widths from intrinsic widths, flex columns and the maximum table width?",
+  "file": "lib/src/rendering/table.dart",
+  "start": 1068,
+  "end": 1234,
+  "needle": "final flexes = List<double?>.filled(columns, null);"
+ },
+ {
+  "id": 6,
+  "kind": "keyword",
+  "question": "In reading order focus traversal, how is the next node picked from the topmost horizontal band of candidates?",
+  "file": "lib/src/widgets/focus_traversal.dart",
+  "start": 1636,
+  "end": 1703,
+  "needle": "final _ReadingOrderSortData topmost = candidates.first;"
+ },
+ {
+  "id": 7,
+  "kind": "behaviour",
+  "question": "Which code bisects on the parameter until the estimated x lies within a small error bound of the input, then returns the matching y value of a two-control-point curve?",
+  "file": "lib/src/animation/curves.dart",
+  "start": 403,
+  "end": 418,
+  "needle": "final double midpoint = (start + end) / 2;"
+ },
+ {
+  "id": 8,
+  "kind": "behaviour",
+  "question": "Where does the code fit a polynomial of a given degree to weighted samples with a QR decomposition and report a confidence value for the result?",
+  "file": "lib/src/gestures/lsq_solver.dart",
+  "start": 106,
+  "end": 203,
+  "needle": "final result = PolynomialFit(degree);"
+ },
+ {
+  "id": 9,
+  "kind": "behaviour",
+  "question": "Given an input size, an output size and a scaling mode such as cover or contain, what computes the source and destination sizes to paint?",
+  "file": "lib/src/painting/box_fit.dart",
+  "start": 146,
+  "end": 229,
+  "needle": "case BoxFit.scaleDown:"
+ },
+ {
+  "id": 10,
+  "kind": "behaviour",
+  "question": "How long does an Android-matching deceleration last, computed from the initial velocity, friction and an inflexion constant?",
+  "file": "lib/src/widgets/scroll_simulation.dart",
+  "start": 218,
+  "end": 230,
+  "needle": "math.pow(velocity.abs() / referenceVelocity, 1 / (_kDecelerationRate - 1.0)) as double;"
+ },
+ {
+  "id": 11,
+  "kind": "behaviour",
+  "question": "Which code encodes a non-negative length prefix into one, three, or five bytes depending on how large the number is?",
+  "file": "lib/src/services/message_codecs.dart",
+  "start": 542,
+  "end": 553,
+  "needle": "buffer.putUint8(254);"
+ },
+ {
+  "id": 12,
+  "kind": "behaviour",
+  "question": "Where does a row or column layout measure its rigid children first and then split the leftover main-axis space among the remaining children in proportion to their factors?",
+  "file": "lib/src/rendering/flex.dart",
+  "start": 1205,
+  "end": 1313,
+  "needle": "final bool canFlex = maxMainSize.isFinite;"
+ },
+ {
+  "id": 13,
+  "kind": "behaviour",
+  "question": "Which code stably orders part of a list, using insertion for short ranges and halving the extra scratch memory for longer ones?",
+  "file": "lib/src/foundation/collections.dart",
+  "start": 156,
+  "end": 182,
+  "needle": "final scratchSpace = List<T>.filled(secondLength, list[start]);"
+ },
+ {
+  "id": 14,
+  "kind": "vague",
+  "question": "My app shows lots of photos, and older photos seem to vanish from memory and reload when I scroll back. What throws them away?",
+  "file": "lib/src/painting/image_cache.dart",
+  "start": 490,
+  "end": 516,
+  "needle": "while (_currentSizeBytes > _maximumSizeBytes || _cache.length > _maximumSize) {"
+ },
+ {
+  "id": 15,
+  "kind": "vague",
+  "question": "My input box stops accepting letters after the max, but emoji like flags count as one letter. What cuts off the extra input?",
+  "file": "lib/src/services/text_formatter.dart",
+  "start": 541,
+  "end": 561,
+  "needle": "final iterator = CharacterRange(value.text);"
+ },
+ {
+  "id": 16,
+  "kind": "vague",
+  "question": "The phone's spoken assistant reads items side by side from left to right, but flips that order when my app is in Arabic. What decides this?",
+  "file": "lib/src/semantics/semantics.dart",
+  "start": 4580,
+  "end": 4627,
+  "needle": "horizontalGroups = horizontalGroups.reversed.toList();"
+ },
+ {
+  "id": 17,
+  "kind": "vague",
+  "question": "When I turn on the slow-motion debug switch, all my app's animations crawl. Where does the app stretch out the clock each frame gets?",
+  "file": "lib/src/scheduler/binding.dart",
+  "start": 1116,
+  "end": 1125,
+  "needle": "(rawDurationSinceEpoch.inMicroseconds / timeDilation).round() +"
+ },
+ {
+  "id": 18,
+  "kind": "vague",
+  "question": "When I type in a box near the bottom and the virtual keyboard pops up, the page scrolls so the blinking cursor stays visible with room below for the drag handle. What does this?",
+  "file": "lib/src/widgets/editable_text.dart",
+  "start": 4463,
+  "end": 4536,
+  "needle": "final RevealedOffset targetOffset = _getOffsetToRevealCaret(caretRect);"
+ },
+ {
+  "id": 19,
+  "kind": "vague",
+  "question": "On iPhone, once my list comes to rest, a tiny finger wobble does not nudge it. It only begins moving after I drag a bit, and then it eases in without a jump. Why?",
+  "file": "lib/src/widgets/scroll_activity.dart",
+  "start": 350,
+  "end": 394,
+  "needle": "_offsetSinceLastStop = _offsetSinceLastStop! + offset;"
+ },
+ {
+  "id": 20,
+  "kind": "vague",
+  "question": "The colors in my iPhone-style app change by themselves when I switch to dark mode, open a popup sheet, or turn on increased contrast. Where is the right shade picked?",
+  "file": "lib/src/cupertino/colors.dart",
+  "start": 1012,
+  "end": 1055,
+  "needle": "final bool highContrast ="
+ }
+]
