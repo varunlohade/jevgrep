@@ -76,6 +76,8 @@ Each test used an answer key of "where is X?" questions written by one agent. So
 
 v4 finds the most answers and points at the tightest ranges. jegrep is right on the first pick one more time out of 20, and it is about 2× faster.
 
+**We also tried jegrep's own pipeline shape (v5)**: a local rarity-weighted keyword scan keeps 128 files, one yes/no round on file names, then one round on per-function "cards". On the same 20 questions it found 17/20, got 12/20 first picks, and averaged 8.6 s. It lost to v4 on every count. Keeping only the best keyword-matching files hurts vague questions. In Python, the local scan alone takes 1.6 s on this repo. jegrep's speed comes largely from being compiled Rust.
+
 Earlier tests used v3:
 
 **Small repo:** a 27-file, 10k-line Swift app, 20 questions.
