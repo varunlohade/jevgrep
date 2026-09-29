@@ -66,15 +66,16 @@ Each test used an answer key of "where is X?" questions written by one agent. So
 
 **Big public repo: the Flutter framework** (`packages/flutter`, 694 files, 566k lines), 20 held-out questions: 6 keyword, 7 behaviour, 7 vague. The questions and answers are in [`bench/questions_flutter.json`](bench/questions_flutter.json), so you can rerun this yourself.
 
-| | jevgrep v4 (current) | jevgrep v3 | [jegrep](https://github.com/can1357/jegrep) 0.1.3 |
-|---|---|---|---|
-| Found | **18/20** | 17/20 | 16/20 |
-| First pick right | 14/20 | 10/20 | **15/20** |
-| Vague questions, first pick | **4/7** | 1/7 | **4/7** |
-| Lines to read to reach the hit (median) | **77** | 103 | 395 |
-| Time per question | 4.1 s | 3.0 s | **1.8 s** |
+| | jevgrep (current, two runs) | jevgrep v4 | jevgrep v3 | [jegrep](https://github.com/can1357/jegrep) 0.1.3 |
+|---|---|---|---|---|
+| Found | **18–19/20** | 18/20 | 17/20 | 16/20 |
+| First pick right | 14–15/20 | 14/20 | 10/20 | **15/20** |
+| Lines to read to reach the hit (median) | 77–93 | **77** | 103 | 395 |
+| Time per question | 2.6–2.8 s | 4.1 s | 3.0 s | **1.8 s** |
 
-v4 finds the most answers and points at the tightest ranges. jegrep is right on the first pick one more time out of 20, and it is about 2× faster.
+jevgrep finds the most answers and points at far tighter ranges. It ties jegrep on first picks within run-to-run noise (about ±1 of 20). jegrep is still about 1.5× faster.
+
+**Where the time goes.** jev answers any request in about 0.35–0.5 s, whether it holds 4 questions or 64. jevgrep makes 4 rounds (folders, files, chunk pick, real-code check) plus about 0.2 s of local work. jegrep makes 3, because it prunes files by keyword match first, and that pruning is what costs it the vague questions. Speed-ups that worked: folder batches carry only their own folders (1.5 s → 0.5 s), a cached token index replaces a scan over every chunk (0.6 s → under 0.05 s), and connections stay open. What did not work: judging every file in one wave of 27 parallel requests (jev queues bursts, 1.2–2.2 s).
 
 **We also tried jegrep's own pipeline shape (v5)**: a local rarity-weighted keyword scan keeps 128 files, one yes/no round on file names, then one round on per-function "cards". On the same 20 questions it found 17/20, got 12/20 first picks, and averaged 8.6 s. It lost to v4 on every count. Keeping only the best keyword-matching files hurts vague questions. In Python, the local scan alone takes 1.6 s on this repo. jegrep's speed comes largely from being compiled Rust.
 

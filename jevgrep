@@ -26,23 +26,34 @@ def load_key():
     sys.exit("jevgrep: set TYPESAFE_API_KEY (env, ~/.config/jevgrep/key, ./.env or ~/.env)")
 
 
+_CONN = __import__("threading").local()
+
 def post_json(url, key, body):
-    import random
+    """POST to jev over a kept-open HTTPS connection (one per thread), with retries and backoff."""
+    import http.client, random
+    from urllib.parse import urlparse
+    u = urlparse(url)
     data = json.dumps(body).encode()
+    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
     for attempt in range(6):
-        req = urllib.request.Request(url, data=data, method="POST", headers={
-            "Authorization": f"Bearer {key}", "Content-Type": "application/json"})
+        conn = getattr(_CONN, "c", None)
+        if conn is None:
+            conn = _CONN.c = http.client.HTTPSConnection(u.netloc, timeout=60)
         try:
-            with urllib.request.urlopen(req, timeout=60) as r:
-                return json.load(r)
-        except urllib.error.HTTPError as e:
-            if e.code in (408, 429, 500, 502, 503, 504, 529) and attempt < 5:
-                time.sleep(0.4 * 2 ** attempt + random.random() * 0.3); continue
-            raise RuntimeError(f"jev returned HTTP {e.code}: {e.read()[:200]!r}") from None
-        except (urllib.error.URLError, TimeoutError, ConnectionError):
+            conn.request("POST", u.path, data, headers)
+            r = conn.getresponse()
+            payload = r.read()
+        except (OSError, http.client.HTTPException):
+            _CONN.c = None
+            conn.close()
             if attempt < 5:
-                time.sleep(0.4 * 2 ** attempt); continue
-            raise
+                time.sleep(0.2 * 2 ** attempt); continue
+            raise RuntimeError("jev connection failed") from None
+        if r.status == 200:
+            return json.loads(payload)
+        if r.status in (408, 429, 500, 502, 503, 504, 520, 521, 522, 524, 529) and attempt < 5:
+            time.sleep(0.4 * 2 ** attempt + random.random() * 0.3); continue
+        raise RuntimeError(f"jev returned HTTP {r.status}: {payload[:200]!r}")
     raise RuntimeError("jev unavailable")
 
 
@@ -132,7 +143,7 @@ def ask(question, criteria, state=None):
     return post_json(API, KEY, body)["answers"]["q"]
 
 CACHE_DIR = os.path.expanduser("~/.cache/jevgrep")
-CACHE_VERSION = "3"  # bump when chunking or summaries change
+CACHE_VERSION = "5"  # bump when chunking or summaries change
 
 def indexed(root, files):
     """Chunk and summarise every file once; keep it on disk keyed by mtime."""
@@ -158,7 +169,39 @@ def indexed(root, files):
     if dirty:
         os.makedirs(CACHE_DIR, exist_ok=True)
         pickle.dump({f: cache[f] for f in out}, open(path, "wb"))
+    inv_path = path[:-4] + ".inv.pkl"
+    try:
+        if dirty:
+            raise FileNotFoundError
+        INV.update(pickle.load(open(inv_path, "rb")))
+    except Exception:
+        INV.clear()
+        for f, hit in out.items():
+            for t in set().union(*(c[4] for c in hit[2])) if hit[2] else ():
+                INV.setdefault(t, []).append(f)
+        pickle.dump(INV, open(inv_path, "wb"))
     return out
+
+INV = {}  # token -> [files that use it], cached next to the index
+
+def grep_lane(qwords, idx, top_files=60):
+    """Chunks scored by how many question words they use. The token index narrows it to the best files first."""
+    matched = {}
+    for q in qwords:
+        matched[q] = {t for t in INV if t.startswith(q) or (q.startswith(t) and len(t) >= 4)}
+    fscore = {}
+    for q, toks in matched.items():
+        for f in {f for t in toks for f in INV[t]}:
+            fscore[f] = fscore.get(f, 0) + 1
+    best = sorted(fscore, key=lambda f: (-fscore[f], f))[:top_files]
+    ranked = []
+    for f in best:
+        for c in idx[f][2]:
+            sc = sum(1 for toks in matched.values() if c[4] & toks)
+            if sc:
+                ranked.append((sc, f, c))
+    ranked.sort(key=lambda x: (-x[0], x[1], x[2][1]))
+    return ranked
 
 def fit(criteria, limit=80_000):
     """Keep a jev request under its size limit by trimming each option evenly."""
@@ -206,7 +249,8 @@ DIR_NO = "Nothing about the folder's name, location, or listed files suggests it
 CODE_YES = "The code directly implements, decides, or defines what the search describes."
 CODE_NO = "The code is unrelated, or only shares surface words with the search without doing the thing itself."
 BATCH = 64       # yes/no questions per request
-PARALLEL = 8     # requests in flight
+PARALLEL = 8     # requests in flight (jev queues bigger bursts)
+FOLDER_ROUND_ABOVE = int(os.environ.get("JEVGREP_FOLDER_ROUND_ABOVE", "200"))  # bigger repos pick folders first: two small rounds beat one big wave
 
 def nouls(question, state, items, instruction, yes, no):
     """One yes/no question per item, batched and sent in parallel. Returns P(yes) per item.
@@ -254,29 +298,28 @@ def find(root, question, k=5, max_chunks=MAX_OPTIONS, as_json=False):
     qwords = {stem(w) for w in re.findall(r"[a-z]{3,}", question.lower()) if w not in STOP}
     def gscore(tokens):
         return sum(any(t.startswith(q) or q.startswith(t) and len(t) >= 4 for t in tokens) for q in qwords)
-    graded = sorted(((gscore(c[4]), f, c) for f in files for c in idx[f][2]), key=lambda x: -x[0])
+    graded = grep_lane(qwords, idx)
     grep_hits = [(f, c) for sc, f, c in graded[:8] if sc > 0]
     grep_files = list(dict.fromkeys(f for sc, f, c in graded if sc > 0))[:30]
     # Folders (big repos): yes/no per folder from its path and file names.
     shortlist = list(files)
-    if len(files) > 200:
+    if len(files) > FOLDER_ROUND_ABOVE:
         folders = {}
         for f in files:
             folders.setdefault(os.path.dirname(f) or ".", []).append(f)
         names = sorted(folders)
-        state = {"task": "Semantic grep over a source tree: find folders likely to hold the code the search describes.",
-                 "folders": {f"f{i:03d}": {"path": d, "files": [os.path.basename(x) for x in folders[d]][:40]}
-                             for i, d in enumerate(names)}}
-        # The state holds every folder; questions refer to them by key, so each batch sees the whole tree.
-        keys = [f"f{i:03d}" for i in range(len(names))]
-        if len(json.dumps(state)) > 70_000:
-            for v in state["folders"].values():
-                v["files"] = v["files"][:8]
-        ps = nouls(question, state, keys,
-                   lambda key: f"Does folder `folders.{key}` contain, at any depth, a file relevant to this search: \"{question}\"?",
-                   DIR_YES, DIR_NO)
+        from concurrent.futures import ThreadPoolExecutor as _Pool
+        def judge_folders(part):
+            st = {"task": "Semantic grep over a source tree: find folders likely to hold the code the search describes.",
+                  "folders": {f"f{i:03d}": {"path": d, "files": [os.path.basename(x) for x in folders[d]][:25]}
+                              for i, d in enumerate(part)}}
+            return nouls(question, st, [f"f{i:03d}" for i in range(len(part))],
+                         lambda key: f"Does folder `folders.{key}` contain, at any depth, a file relevant to this search: \"{question}\"?",
+                         DIR_YES, DIR_NO)
+        with _Pool(PARALLEL) as pool:
+            ps = [p for chunk in pool.map(judge_folders, [names[i:i + BATCH] for i in range(0, len(names), BATCH)]) for p in chunk]
         best = keep(names, ps, 0.3, 12)
-        shortlist = list(dict.fromkeys(grep_files + [f for d in best for f in folders[d]]))
+        shortlist = list(dict.fromkeys(grep_files + [f for d in best for f in folders[d]]))[:3 * BATCH]
     t_short = time.perf_counter()
     # Files: yes/no per file from its path and declared names.
     parts = [shortlist[i:i + BATCH] for i in range(0, len(shortlist), BATCH)]
@@ -284,7 +327,7 @@ def find(root, question, k=5, max_chunks=MAX_OPTIONS, as_json=False):
     from concurrent.futures import ThreadPoolExecutor
     def judge_files(part):
         state = {"task": "Semantic grep: judge which source files likely hold the code the search describes.",
-                 "files": {f"e{i:03d}": {"path": f, "declares": idx[f][1][:500]} for i, f in enumerate(part)}}
+                 "files": {f"e{i:03d}": {"path": f, "declares": idx[f][1][:300]} for i, f in enumerate(part)}}
         return nouls(question, state, [f"e{i:03d}" for i in range(len(part))],
                      lambda key: f"Is file `files.{key}` likely to contain what this search is looking for: \"{question}\"?",
                      FILE_YES[1], FILE_NO[1])
@@ -299,7 +342,8 @@ def find(root, question, k=5, max_chunks=MAX_OPTIONS, as_json=False):
         if (f, c[1]) not in seen:
             seen.add((f, c[1])); cands.append((f, c))
     cands = cands[:max_chunks]
-    a = ask(f"Which code chunk answers: {question}", fit({str(i + 1): c[3] for i, (f, c) in enumerate(cands)}))
+    cands = cands[:160]
+    a = ask(f"Which code chunk answers: {question}", fit({str(i + 1): c[3] for i, (f, c) in enumerate(cands)}, 45_000))
     pick_p = {int(key) - 1: p for key, p in a["probabilities"].items()}
     shortlist_chunks = sorted(range(len(cands)), key=lambda i: -pick_p.get(i, 0))[:8]
     for f, c in grep_hits[:2]:                     # grep's best always get a real-code check too
